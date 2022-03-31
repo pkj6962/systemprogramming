@@ -6,7 +6,7 @@
 #define MAXPIP 20 
 #define WRITEEND 0
 #define READEND 1 
-
+    
 void eval(char *cmdline);
 int preproc_command(char * buffer, int *idx);
 void parse_line(char * buffer, char *argv[], int* idx, bool *pipe_start_flag); 
@@ -15,34 +15,24 @@ void parse_line(char * buffer, char *argv[], int* idx, bool *pipe_start_flag);
 int main(void){
     int idx = 0; 
     bool pipe_start_flag = false; 
-    char buffer[] = "ls -al     &     \0";
-    char* argv[MAXARGS];   
-    int bg = preproc_command(buffer, &idx); 
 
-    int i; 
+    char cmdline[MAXLINE]; /* Command line */
 
-    eval(buffer); 
-    printf("%d", pipe_start_flag); // this line shoould not be executed
-    printf("\n\n");
-    
+    while (1) {
+	/* Read */
+	    printf("> ");                   
+	    fgets(cmdline, MAXLINE, stdin); 
+	    if (feof(stdin))
+	        exit(0);
+
+	    /* Evaluate */
+	    eval(cmdline);
+    }     
 }
 
-    //printf("%s", buffer); 
-
-
-
-    /*
-    char cmdline[MAXLINE];
-    while(1){
-        printf("> ");
-        fgets(cmdline, MAXLINE, stdin); 
-        if(feof(stdin)){            
-            exit(0); 
-        }
-        eval(cmdline); 
-    }
  
-}   
+
+/*
 void eval(char *cmdline){
       */ 
 
@@ -129,8 +119,8 @@ void eval(char *cmdline){
 void eval(char *cmdline){
         int idx = 0, pidx = 0;
         char * argv[MAXARGS];
-        char * buffer[MAXARGS];
-        char * envp[2] = {"/usr/bin/", '\0'}; 
+        char buffer[MAXARGS];
+        char * envp[2] = {"/usr/bin/", "0"}; 
         int fd[2]; 
         pid_t pid[MAXPIP]; 
         int bg, child_status; 
@@ -139,7 +129,7 @@ void eval(char *cmdline){
         bool pipe_end_flag = false; // this argv input from ReadEnd of Pipe
 
         bg = preproc_command(cmdline, &idx); 
-        strcpy(cmdline, buffer);  
+        strcpy(buffer, cmdline);  
 
         while(buffer[idx] != '\0'){
                 
@@ -148,32 +138,36 @@ void eval(char *cmdline){
 
             parse_line(&buffer[idx], argv, &idx, &pipe_end_flag); // parse until it meets '\0' or '|'(assign its (index-1) on idx)
 
-            int i = 0;
-            while(argv[i] != '\0')
-                printf("%s", argv[i]); 
-
             pipe(fd); 
-
-            printf("pipe_flag: %d %d\n", pipe_start_flag, pipe_end_flag);
+        
             if((pid[pidx] = fork()) == 0){
                 if(pipe_start_flag)
-                    dup2(fd[WRITEEND],stdout); 
+                    dup2(fd[WRITEEND],STDOUT_FILENO); 
                 
                 if(pipe_end_flag){
-                    dup2(fd[READEND], stdin); 
+                    dup2(fd[READEND], STDIN_FILENO); 
                     waitpid(pid[pidx-1], &child_status, NULL); 
                 }
                 // we should get input from fd[READEND] and put it on argv 
-                execvpe(argv[0], argv, envp);                 
+                if(execvp(argv[0], argv) < 0){
+                    printf("%s\n", strerror(errno)); 
+                    printf("exe error");
+                    exit(1);              
+                }    
+
             }
             else if(pid[pidx] < 0){
                 printf("Error");
                 exit(1); 
             } 
+            else{ // parent process
+                if(!bg){
+                    wait(&child_status); 
+                }
+            }
             ++idx; 
         }
-
-    }
+}
     
 
 /*
@@ -194,8 +188,9 @@ int preproc_command(char * buffer, int *idx){
     // delete unnecessary blank from front and end of the command 
     // and check whether it is background process
 
-    while(buffer[*idx] == ' ')
+    while(buffer[*idx] == ' '){
         ++(*idx); 
+    }
     
     int end_idx = strlen(buffer)-1; 
 
@@ -217,14 +212,15 @@ void parse_line(char *buffer, char *argv[], int* idx, bool* pipe_start_flag){
 Parse-line: buffer 에 입력된 커맨드를 ArgV에 저장 | ls -al | grep -n "txt"
 ***********/
 
-        int i = *idx; 
+        int i = 0; 
+        // int i = *idx; 
         int bg; 
         int arg_idx = 0; 
         int end_idx ; 
         char c;
         bool isLastLetter = false; 
 
-        while((c = buffer[i]) != '\0' && c != '|'){
+        while((c = buffer[i]) != '\0' && c != '|' && c != '\n'){
             if (c != ' ' && isLastLetter == false){
                 argv[arg_idx++] = &buffer[i]; 
                 isLastLetter = true;  
@@ -243,12 +239,13 @@ Parse-line: buffer 에 입력된 커맨드를 ArgV에 저장 | ls -al | grep -n 
             buffer[i] = '\0'; // eval function 의 while 문 끝에서 idx ++를 한다. 이때 c == '|' 였을 경우 더 읽어야 하므로 i를 증가시키지 않는다. 
         }
         else{ //last character was '\0'; 
+            buffer[i] = '\0';
             *pipe_start_flag = false; 
             --i;  // string의 끝에서 eval은 멈춰야 하므로 idx ++ 했을 때 '\0'을 만나도록 idx를 조정한다. 
         }
-        argv[arg_idx] = '\0';   // set last index of argument vector as zero  
-        *idx = i;  // 
-        return ; 
+        argv[arg_idx] = NULL;   // set last index of argument vector as zero  
+        *idx = *idx + i;  // 
+        return; 
 }
 
 
