@@ -4,8 +4,8 @@
 #include <string.h>
 #define MAXARGS 128
 #define MAXPIP 20 
-#define WRITEEND 0
-#define READEND 1 
+#define READEND 0
+#define WRITEEND 1 
     
 void eval(char *cmdline);
 int preproc_command(char * buffer, int *idx);
@@ -131,6 +131,8 @@ void eval(char *cmdline){
         bg = preproc_command(cmdline, &idx); 
         strcpy(buffer, cmdline);  
 
+
+        pipe(fd); 
         while(buffer[idx] != '\0'){
                 
             /*check if it is piped process*/
@@ -138,15 +140,20 @@ void eval(char *cmdline){
 
             parse_line(&buffer[idx], argv, &idx, &pipe_end_flag); // parse until it meets '\0' or '|'(assign its (index-1) on idx)
 
-            pipe(fd); 
         
             if((pid[pidx] = fork()) == 0){
-                if(pipe_start_flag)
+                if(!pipe_start_flag && pipe_end_flag){
                     dup2(fd[WRITEEND],STDOUT_FILENO); 
-                
-                if(pipe_end_flag){
-                    dup2(fd[READEND], STDIN_FILENO); 
-                    waitpid(pid[pidx-1], &child_status, NULL); 
+                    close(fd[READEND]); 
+                }
+                else if(pipe_start_flag && !pipe_end_flag){
+                    dup2(fd[READEND], STDIN_FILENO);
+                    close(fd[WRITEEND]);  
+                    // waitpid(pid[pidx-1], &child_status, NULL); 
+                }   
+                else if(pipe_start_flag && pipe_end_flag){
+                    dup2(fd[WRITEEND],STDOUT_FILENO); 
+                    dup2(fd[READEND], STDIN_FILENO);
                 }
                 // we should get input from fd[READEND] and put it on argv 
                 if(execvp(argv[0], argv) < 0){
@@ -154,16 +161,16 @@ void eval(char *cmdline){
                     printf("exe error");
                     exit(1);              
                 }    
-
+    
             }
             else if(pid[pidx] < 0){
                 printf("Error");
                 exit(1); 
             } 
             else{ // parent process
-                if(!bg){
-                    wait(&child_status); 
-                }
+                // if(!bg){
+                //     wait(&child_status); 
+                // }
             }
             ++idx; 
         }
