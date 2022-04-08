@@ -1,25 +1,34 @@
-#include "csapp.h"
-#include <errno.h>
-#include <stdbool.h>
-#include <string.h>
+#include "myshell.h"
+#define MAXLINE 8192
 #define MAXARGS 128
 #define MAXPIP 20 
 #define READEND 0
 #define WRITEEND 1 
     
-void eval(char *cmdline);
-int preproc_command(char * buffer, int *idx);
-void parse_line(char * buffer, char *argv[], int* idx, bool *pipe_start_flag); 
-
+volatile pid_t reaped_id[MAXPIP] = { 0 }; // terminate된 프로세스가 reap됐는지를 알려주는 Array 
+volatile pid_t pid[MAXPIP] = { 0 }; // 생성된 자식프로세스의 pid를 저장하는 Array
+volatile int pcount; // 생성된 자식 프로세스의 개수 
+volatile int reap_count; // reap 된 자식 프로세스의 개수 
+volatile int foreground_proc_id; 
+volatile bool sigtstp_flag = false; 
 
 int main(void){
     int idx = 0; 
     bool pipe_start_flag = false; 
+    signal(SIGINT, sigint_handler); 
+    signal(SIGCHLD, sigchld_handler); 
+    signal(SIGTSTP, sigtstp_handler); 
 
     char cmdline[MAXLINE]; /* Command line */
 
     while (1) {
 	/* Read */
+        // init global variable(pcount, reap_count)
+
+        pcount = 0; reap_count = 0; 
+        memset((pid_t*)reaped_id, 0, sizeof(pid_t) * MAXPIP);
+        memset((pid_t*)pid, 0, sizeof(pid_t) * MAXPIP);  
+
 	    printf("> ");                   
 	    fgets(cmdline, MAXLINE, stdin); 
 	    if (feof(stdin))
@@ -30,91 +39,7 @@ int main(void){
     }     
 }
 
- 
 
-/*
-void eval(char *cmdline){
-      */ 
-
-    /*
-
-    ************
-
-    1. cmdline 의 명령어를 parse_line 해서 char * argv[] 에 저장
-    2. 자식 프로세스를 생성(fork)해서 실행(execve)
-    
-    ************
-
-    pid_t pid[MAXPIP]; 
-    int process_cnt;  // counted in parse_line function
-
-    char buffer[MAX_LINE]; //cmd_line상 string을 buffer에 copy 
-    char* argv[MAX_ARGS];
-
-    int bg; // process가 bg인지 fg인지에 따라 다른 값 할당
-
-    strcpy(cmdline, buffer); 
-    parse_line(buffer, arv); 
-
-    if(!bg)
-        wait(); 
-
-    */
-   
-
-    /*
-
-    ***********
-    How to Implement Pipe
-    ***********
-
-    ***********
-    Idea 
-    ***********
-    - 파이프는 재귀로
-        dup(fd, stdout)를 통해 stdout으로 출력하던 ls의 출구를 새로운 fd로 보낼 수 있다.
-        dup(fd ,stdin)를 통해 stdin으로 입력받던? grep의 입구를 새로운 입구로 대신 설정할 수 있다. 
-
-    따라서 파이프입구쪽 프로세스를 실행하기 전  fd:stdout 을 fd[WRITE_END]로 바꾸어 놓고 프로세스를 실행한다.
-    마찬가지로 파이프출구쪽 프로세스를 실행하기전 fd:stdin을 fd[READ_END]로 바꾸어 놓은 다음 출력한다.
-
-    
-    dup() --> execvpe(ls) --> eval(buf[i+1]) 
-
-
-
-    parse_line(cmdline, argv); 
-    - argv에서 각 process가  시작하는 위치를 저장하는 배열을 하나 선언한다. 
-
-   
-   
-    ***********
-    Eval() FUnction: Psudo-Code 
-    ***********
-    
-    eval(cmdline){
-
-        bool    pipe_start_flag = false; 
-        bool    pipe_end_flag = false; 
-
-        UNTIL(buffer meets EndOfString)
-            eval()
-            parse_line until encountering '|' or '\0'
-            if(buffer[i] == '|') 
-                pipe_end_flag = true; 
-        
-            if(마지막args == '|')
-                pipe_start_flag = true; 
-
-
-            if((fid = fork()) == 0){
-                if(pipe_end_flag) dup(fd[WRITE_END],stdout)
-                execvpe(); 
-                exit(); // this line will not be executed 
-            }
-        
-    }
-    ************/
 
 void eval(char *cmdline){
         int idx = 0, pidx = 0;
@@ -123,10 +48,17 @@ void eval(char *cmdline){
         char * envp[2] = {"/usr/bin/", "0"}; 
         int fd[2]; 
         pid_t pid[MAXPIP]; 
+        sigset_t blocking_mask; 
         int bg, child_status; 
 
         bool pipe_start_flag = false; // this argv print output to the WriteEnd of Pipe; 
         bool pipe_end_flag = false; // this argv input from ReadEnd of Pipe
+        
+        
+        Sigfillset(&blocking_mask); 
+        Sigdelset(&blocking_mask, SIGTSTP); 
+        Sigdelset(&blocking_mask, SIGINT);
+        Sigdelset(&blocking_mask, SIGCHLD); 
 
         bg = preproc_command(cmdline, &idx); 
         strcpy(buffer, cmdline);  
@@ -141,7 +73,8 @@ void eval(char *cmdline){
             parse_line(&buffer[idx], argv, &idx, &pipe_end_flag); // parse until it meets '\0' or '|'(assign its (index-1) on idx)
 
         
-            if((pid[pidx] = fork()) == 0){
+            if((pid[pcount] = Fork()) == 0){
+                int big_bro_idx = pcount - 1; // 직전 프로세스의 인덱스 
                 if(!pipe_start_flag && pipe_end_flag){
                     dup2(fd[WRITEEND],STDOUT_FILENO); 
                     close(fd[READEND]); 
@@ -149,11 +82,19 @@ void eval(char *cmdline){
                 else if(pipe_start_flag && !pipe_end_flag){
                     dup2(fd[READEND], STDIN_FILENO);
                     close(fd[WRITEEND]);  
-                    // waitpid(pid[pidx-1], &child_status, NULL); 
+
+                    while(reaped_id[big_bro_idx] == 0){ // 직전 프로세스가 실행중인 동안 
+                        printf("this line works"); 
+                        Sigsuspend(&blocking_mask);
+                    }
                 }   
                 else if(pipe_start_flag && pipe_end_flag){
                     dup2(fd[WRITEEND],STDOUT_FILENO); 
                     dup2(fd[READEND], STDIN_FILENO);
+                
+                    while(reaped_id[big_bro_idx] == 0){ // 직전 프로세스가 실행중인 동안 
+                        Sigsuspend(&blocking_mask); // wait for SIGCONT
+                    }
                 }
                 // we should get input from fd[READEND] and put it on argv 
                 if(execvp(argv[0], argv) < 0){
@@ -163,33 +104,21 @@ void eval(char *cmdline){
                 }    
     
             }
-            else if(pid[pidx] < 0){
-                printf("Error");
-                exit(1); 
-            } 
-            else{ // parent process
-                // if(!bg){
-                //     wait(&child_status); 
-                // }
+            else{ // parent process"
+                if(!bg){
+                    foreground_proc_id = pid[pcount]; // 현재 fg에서 돌아가고 있는 프로세스 ID
+                    printf("%d\n", foreground_proc_id); 
+                    while(reaped_id[pcount] == 0 && sigtstp_flag == false){
+                        Sigsuspend(&blocking_mask); // wait for sigchld 
+                    }
+                    sigtstp_flag = false; // reset flag to false(it changed at sigtstp_flag)
+                }
+                ++pcount; 
             }
             ++idx; 
-        }
+        } 
 }
     
-
-/*
-    ***********
-    Remaining Problem To Solve 
-    ***********
-    1. piped process 는 piping process가 terminate 될 때까지 기다려야 한다. 
-        1) piping process가 부모에게 SIGCHLD를 날린다. 부모는 그 Signal을 받고 이 소식을 piped proccess 에게 날린다(: 어떤 Signal? UserDefined Signal?). 
-    2. can process reap its sibling process?
-    
-
-
-
-*/
-
 int preproc_command(char * buffer, int *idx){
     
     // delete unnecessary blank from front and end of the command 
@@ -255,83 +184,140 @@ Parse-line: buffer 에 입력된 커맨드를 ArgV에 저장 | ls -al | grep -n 
         return; 
 }
 
+/*********************************************
+ *Signal handlers
+ ********************************************/
+ 
+ void sigchld_handler(int sig){
+     sigset_t mask, prev; 
+     int olderrno = errno; 
 
-    /*
-    0. buffer를 처음부터 끝('\0')까지 쭉 봐야 함
-        2) 문자 끝 '공백' 또는 '|'에 '\0' 할당
-            i) Encounter ' ' when IsLastLetter == true : 
-                buffer[i] = '\0';
-                IsLastLetter = false;  
+     Sigfillset(&mask); 
+     Sigprocmask(SIG_BLOCK, &mask, &prev); 
 
-            공백(&, |)을 만났는데 이전 char가 문자였으면(flag=true) '\0'으로
-            ii) encounter '|': 
-                if(IsLestLetter) buffer[i] = '\0';
-                pidx +=1; argIdx = 0;  
-                IsLastLetter = false;  
-
-
-        3) 문자를 만났는데 이전 char가 ' '였으면 해당 주소를 argv상 원소로
-                if(ISLastLetter == False)  
-            i) argv[pidx][argIdx] = &buffer[i]; 
-                argIdx += 1; 
-                IsLastLetter = true; 
-
-
-
-
-    }
+    reaped_id[reap_count] = Waitpid(pid[reap_count], NULL, 0); 
+    printf("%d", reap_count); 
+    printf("process %d terminated", reaped_id[reap_count]); 
     
-    ***********
-    Parse_line Psudo Code
-    ***********
-    - What Shoulld be passed by reference from Eval()
-        - buffer
-        - argv
-        - 프로세스 별 arg 개수? (Is it needed?)
+    ++ reap_count; 
 
-    Parse_line(buffer, argv);
+    if(pid[reap_count] > 0)
+        Kill(pid[reap_count], SIGCONT); 
 
 
-    case)
+    Sigprocmask(SIG_SETMASK, &prev, NULL); 
+    errno = olderrno; 
+}
 
-    1) buffer= '     ls -al | grep 'rwx'&' 
-    2) ''
-    3) 'ls -al|grep 'rwx'
-    argv[0] = 'ls' '-al' '\0'
-    argv[1] = 'grep' ''rwx'
+void sigint_handler(int sig){
+    Kill(foreground_proc_id, SIGINT); 
+    write(STDIN_FILENO, "\n> ", 3); 
+    return; // ignore SIGI
+}
+
+void sigtstp_handler(int sig){
+    sigset_t mask_all, prev_all;
+    int olderrno = errno; 
+    Sigfillset(&mask_all); 
+    Sigprocmask(SIG_BLOCK, &mask_all, &prev_all); 
+
+    Kill(foreground_proc_id, SIGTSTP); 
+    sigtstp_flag = true; 
+    write(STDOUT_FILENO, "hello world\n", 12); 
+    Kill(getpid(), SIGCONT); 
+
+    Sigprocmask(SIG_BLOCK, &prev_all, NULL); 
+    errno = olderrno; 
+}
+
+/*********************************************
+ *Wrapper function
+ ********************************************/
+
+void unix_error(char *msg) /* Unix-style error */
+{
+    fprintf(stderr, "%s: %s\n", msg, strerror(errno));
+    exit(0);
+}
+
+pid_t Fork(void) 
+{
+    pid_t pid;
+
+    if ((pid = fork()) < 0)
+	unix_error("Fork error");
+    return pid;
+}
+/* $end forkwrapper */
+
+void Execve(const char *filename, char *const argv[], char *const envp[]) 
+{
+    if (execve(filename, argv, envp) < 0)
+	unix_error("Execve error");
+}
+
+/* $begin wait */
+pid_t Wait(int *status) 
+{
+    pid_t pid;
+
+    if ((pid  = wait(status)) < 0)
+	unix_error("Wait error");
+    return pid;
+}
+/* $end wait */
+
+pid_t Waitpid(pid_t pid, int *iptr, int options) 
+{
+    pid_t retpid;
+
+    if ((retpid  = waitpid(pid, iptr, options)) < 0) 
+	unix_error("Waitpid error");
+    return(retpid);
+}
+
+/* $begin kill */
+void Kill(pid_t pid, int signum) 
+{
+    int rc;
+
+    if ((rc = kill(pid, signum)) < 0)
+	unix_error("Kill error");
+}
+
+void Sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
+{
+    if (sigprocmask(how, set, oldset) < 0)
+	unix_error("Sigprocmask error");
+    return;
+}
+
+void Sigemptyset(sigset_t *set)
+{
+    if (sigemptyset(set) < 0)
+	unix_error("Sigemptyset error");
+    return;
+}
+
+void Sigfillset(sigset_t *set)
+{ 
+    if (sigfillset(set) < 0)
+	unix_error("Sigfillset error");
+    return;
+}
+
+void Sigdelset(sigset_t *set, int signum)
+{
+    if (sigdelset(set, signum) < 0)
+	unix_error("Sigdelset error");
+    return;
+}
 
 
-
-    - Flag: 
-    bool lastLatter: - 직전 char가 글자였나요(T), 공백 또는 '|' 였나요(F). 
-                     - declare: False 
-
-    - 다 끝낸 다음, 
-    만약 마지막이 '&'였으면 이것은 마지막 프로세스의 마지막 arg로 들어간다. 
-    따라서 마지막 프로세스 마지막 arg를 체크해서 '&'이면 이를 '\0'으로 바꾸고 
-    bg = 1로 할당해준다.
-
-    - 만약 '&'가 이전 커맨드에 붙여서 입력되면? 
-        마지막 args를 '\0'을 만날 때까지 스캔한다, say,
-        ! 이는 파이프를 고려하지 않는 방식이다. 
-
-        i = 0;
-        lastArg = &argv[pidx][argIdx-1] 
-        while(*(last + i)) != '\0' && *(lastArg + i) != '&')
-            i += 1; 
-        if(*(lastArg + i) == '&'){
-            *(lastArg + i) = '\0';
-            bg = 1; 
-        }
-
-        
-
-    - 인덱스 관리 
-        1) buffer index: i 
-        3) argv index: argIdx - 공백 직후 문자를 만날 때 마다 증가
-     
-    */
-
-
-
-
+int Sigsuspend(const sigset_t *set)
+{
+    int rc = sigsuspend(set); /* always returns -1 */
+    if (errno != EINTR)
+        unix_error("Sigsuspend error");
+    return rc;
+}
